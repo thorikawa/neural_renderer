@@ -22,7 +22,7 @@ import neural_renderer
 filename_obj = ""
 
 class Model(chainer.Link):
-    def __init__(self, filename_obj, filename_ref):
+    def __init__(self, filename_obj, front_filename_ref, right_filename_ref, left_filename_ref, top_filename_ref):
         super(Model, self).__init__()
 
         with self.init_scope():
@@ -37,22 +37,68 @@ class Model(chainer.Link):
             self.textures = textures
 
             # load reference image
-            self.image_ref = scipy.misc.imread(filename_ref).astype('float32').mean(-1) / 255.
+            if front_filename_ref:
+                print("use front image")
+                self.front_image_ref = scipy.misc.imread(front_filename_ref).astype('float32').mean(-1) / 255.
+            else:
+                self.front_image_ref = None
+            if right_filename_ref:
+                print("use right image")
+                self.right_image_ref = scipy.misc.imread(right_filename_ref).astype('float32').mean(-1) / 255.
+            else:
+                self.right_image_ref = None
+            if left_filename_ref:
+                print("use left image")
+                self.left_image_ref = scipy.misc.imread(left_filename_ref).astype('float32').mean(-1) / 255.
+            else:
+                self.left_image_ref = None
+            if top_filename_ref:
+                print("use top image")
+                self.top_image_ref = scipy.misc.imread(top_filename_ref).astype('float32').mean(-1) / 255.
+            else:
+                self.top_image_ref = None
 
             # setup renderer
             renderer = neural_renderer.Renderer()
             self.renderer = renderer
 
+            self.count = 0
+
     def to_gpu(self, device=None):
         super(Model, self).to_gpu(device)
         self.faces = chainer.cuda.to_gpu(self.faces, device)
         self.textures = chainer.cuda.to_gpu(self.textures, device)
-        self.image_ref = chainer.cuda.to_gpu(self.image_ref, device)
+        if self.front_image_ref is not None:
+            self.front_image_ref = chainer.cuda.to_gpu(self.front_image_ref, device)
+        if self.right_image_ref is not None:
+            self.right_image_ref = chainer.cuda.to_gpu(self.right_image_ref, device)
+        if self.left_image_ref is not None:
+            self.left_image_ref = chainer.cuda.to_gpu(self.left_image_ref, device)
+        if self.top_image_ref is not None:
+            self.top_image_ref = chainer.cuda.to_gpu(self.top_image_ref, device)
 
     def __call__(self):
-        self.renderer.eye = neural_renderer.get_points_from_angles(2.732, 0, 90)
-        image = self.renderer.render_silhouettes(self.vertices, self.faces)
-        loss = cf.sum(cf.square(image - self.image_ref[None, :, :]))
+        self.renderer.viewing_angle = 30
+        self.renderer.eye = neural_renderer.get_points_from_angles(2.732, 0, 0)
+        front_image = self.renderer.render_silhouettes(self.vertices, self.faces)
+        loss = cf.sum(cf.square(front_image - self.front_image_ref[None, :, :]))
+
+        if self.right_image_ref is not None:
+            self.renderer.eye = neural_renderer.get_points_from_angles(2.732, 0, 90)
+            right_image = self.renderer.render_silhouettes(self.vertices, self.faces)
+            loss = loss + cf.sum(cf.square(right_image - self.right_image_ref[None, :, :]))
+
+        if self.left_image_ref is not None:
+            self.renderer.eye = neural_renderer.get_points_from_angles(2.732, 0, 270)
+            left_image = self.renderer.render_silhouettes(self.vertices, self.faces)
+            loss = loss + cf.sum(cf.square(left_image - self.left_image_ref[None, :, :]))
+
+        if self.top_image_ref is not None:
+            # FIXME: if we set elevetion to 90, it renders nothing...
+            self.renderer.eye = neural_renderer.get_points_from_angles(2.732, 89.9, 0)
+            top_image = self.renderer.render_silhouettes(self.vertices, self.faces)
+            loss = loss + cf.sum(cf.square(top_image - self.top_image_ref[None, :, :]))
+        self.count = self.count + 1
         return loss
 
 @get('/upload')
@@ -60,7 +106,10 @@ def upload():
     return '''
         <form action="/upload" method="post" enctype="multipart/form-data">
             <input type="submit" value="Upload"></br>
-            <input type="file" name="upload"></br>
+            Front:<input type="file" name="upload-front"></br>
+            Right:<input type="file" name="upload-right"></br>
+            Left:<input type="file" name="upload-left"></br>
+            Top:<input type="file" name="upload-top"></br>
         </form>
     '''
 
@@ -68,25 +117,46 @@ def upload():
 def do_upload():
     global filename_obj
 
-    upload = request.files.get('upload', '')
-    if not upload.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-        return 'File extension not allowed!'
+    upload_front = request.files.get('upload-front')
+    upload_right = request.files.get('upload-right')
+    upload_left = request.files.get('upload-left')
+    upload_top = request.files.get('upload-top')
 
-    filename = upload.filename.lower()
-    root, ext = os.path.splitext(filename)
-    save_path = os.path.join('/home/poly/Downloads', filename)
+    #if not upload.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+    #    return 'File extension not allowed!'
 
-    print("trying to save")
-    upload.save(save_path, overwrite=True)
-    print("saved input file")
+    front_image_path = None
+    right_image_path = None
+    left_image_path = None
+    top_image_path = None
 
-    model = Model(filename_obj, save_path)
+    if upload_front:
+        filename = upload_front.filename.lower()
+        front_image_path = os.path.join('/home/poly/Downloads', filename)
+        upload_front.save(front_image_path, overwrite=True)
+
+    if upload_right:
+        filename = upload_right.filename.lower()
+        right_image_path = os.path.join('/home/poly/Downloads', filename)
+        upload_right.save(right_image_path, overwrite=True)
+
+    if upload_left:
+        filename = upload_left.filename.lower()
+        left_image_path = os.path.join('/home/poly/Downloads', filename)
+        upload_left.save(left_image_path, overwrite=True)
+
+    if upload_top:
+        filename = upload_top.filename.lower()
+        top_image_path = os.path.join('/home/poly/Downloads', filename)
+        upload_top.save(top_image_path, overwrite=True)
+
+    model = Model(filename_obj, front_image_path, right_image_path, left_image_path, top_image_path)
     model.to_gpu()
 
     optimizer = chainer.optimizers.Adam()
     optimizer.setup(model)
     def worker():
-        loop = tqdm.tqdm(range(300))
+        loop = tqdm.tqdm(range(1000))
         for i in loop:
             loop.set_description('Optimizing')
             optimizer.target.cleargrads()
@@ -99,7 +169,7 @@ def do_upload():
             model.vertices.to_cpu()
             varray = chainer.as_array(model.vertices)
             for v in varray[0]:
-                str_list.append("[{0},{1},{2}]".format(v[0], v[1], v[2]))
+                str_list.append("{{\"x\":{:.6f},\"y\":{:.6f},\"z\":{:.6f}}}".format(v[0], v[1], v[2]))
             varrayStr = ",".join(str_list)
             model.vertices.to_gpu()
             yield "{{\"vertices\":[{0}]}}\n".format(varrayStr)
